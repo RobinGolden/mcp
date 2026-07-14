@@ -107,13 +107,19 @@ async def run_query(
         Optional[List[Dict[str, Any]]], Field(description='Parameters for the SQL query')
     ] = None,
     port: Annotated[Optional[int], Field(description='Oracle port')] = None,
+    target_name: Annotated[
+        Optional[str],
+        Field(
+            description='Connection target: service name, SID, or tenant database name used at connect time'
+        ),
+    ] = None,
 ) -> str | dict:
     """Run a SQL query against Oracle Database."""
     instance_identifier = instance_identifier or db_endpoint
 
     logger.info(
         f'Entered run_query: method:{connection_method}, instance:{instance_identifier}, '
-        f'db_endpoint:{db_endpoint}, database:{database}'
+        f'db_endpoint:{db_endpoint}, database:{database}, target_name:{target_name}'
     )
     logger.debug(f'run_query sql: {sql}')
 
@@ -123,11 +129,13 @@ async def run_query(
         db_endpoint=db_endpoint,
         database=database,
         port=port if port is not None else server_config.configured_port,
+        target_name=target_name or '',
     )
     if not db_connection:
         err = (
             f'No database connection available for method:{connection_method}, '
-            f'instance_identifier:{instance_identifier}, db_endpoint:{db_endpoint}, database:{database}'
+            f'instance_identifier:{instance_identifier}, db_endpoint:{db_endpoint}, '
+            f'database:{database}, target_name:{target_name}'
         )
         logger.error(err)
         await ctx.error(err)
@@ -210,6 +218,12 @@ async def get_table_schema(
         Optional[str], Field(description='Oracle schema/owner name (optional)')
     ] = None,
     port: Annotated[Optional[int], Field(description='Oracle port')] = None,
+    target_name: Annotated[
+        Optional[str],
+        Field(
+            description='Connection target: service name, SID, or tenant database name used at connect time'
+        ),
+    ] = None,
 ) -> str | dict:
     """Fetch table columns from Oracle ALL_TAB_COLUMNS."""
     instance_identifier = instance_identifier or db_endpoint
@@ -268,12 +282,13 @@ async def get_table_schema(
         database=database,
         query_parameters=params,
         port=port,
+        target_name=target_name,
     )
 
 
 @mcp.tool(
     name='connect_to_database',
-    description='Connect to an Oracle RDS instance and save the connection internally',
+    description='Connect to an Oracle RDS instance or tenant database and save the connection internally',
 )
 async def connect_to_database(
     region: Annotated[str, Field(description='AWS region')],
@@ -292,6 +307,13 @@ async def connect_to_database(
         Optional[str],
         Field(description='Oracle SID (legacy, mutually exclusive with service_name)'),
     ] = None,
+    tenant_database_name: Annotated[
+        Optional[str],
+        Field(
+            description='RDS Oracle tenant database name (for multi-tenant CDB). '
+            'When specified, the secret ARN is retrieved from describe_tenant_databases.'
+        ),
+    ] = None,
     secret_arn: Annotated[
         Optional[str],
         Field(
@@ -299,7 +321,7 @@ async def connect_to_database(
         ),
     ] = None,
 ) -> str | dict:
-    """Connect to an Oracle RDS instance and save the connection internally."""
+    """Connect to an Oracle RDS instance or tenant database and save the connection internally."""
     instance_identifier = instance_identifier or db_endpoint
 
     if service_name and sid:
@@ -317,9 +339,12 @@ async def connect_to_database(
             database=database,
             service_name=service_name,
             sid=sid,
+            tenant_database_name=tenant_database_name,
             secret_arn=secret_arn,
             ssl_encryption=server_config.ssl_encryption_mode,
         )
+
+        target_name = tenant_database_name or service_name or sid or ''
 
         if replaced_conn:
             try:
@@ -332,7 +357,8 @@ async def connect_to_database(
                 await db_connection.initialize_pool()
             except Exception as pool_err:
                 db_connection_map.remove(
-                    connection_method, instance_identifier, db_endpoint, database, port
+                    connection_method, instance_identifier, db_endpoint, database, port,
+                    target_name,
                 )
                 logger.exception(f'connect_to_database pool init failed: {pool_err}')
                 return {'status': 'Failed', 'error': str(pool_err)}
@@ -354,6 +380,12 @@ def is_database_connected(
         Field(description='RDS instance identifier (defaults to db_endpoint if omitted)'),
     ] = None,
     database: Annotated[str, Field(description='database/schema name')] = 'ORCL',
+    target_name: Annotated[
+        Optional[str],
+        Field(
+            description='Connection target: service name, SID, or tenant database name used at connect time'
+        ),
+    ] = None,
 ) -> bool:
     """Check if a connection has been established."""
     instance_identifier = instance_identifier or db_endpoint
@@ -364,6 +396,7 @@ def is_database_connected(
         db_endpoint,
         database,
         port=server_config.configured_port,
+        target_name=target_name or '',
     ):
         return True
     return False
@@ -387,6 +420,7 @@ def internal_create_connection(
     database: str,
     service_name: Optional[str] = None,
     sid: Optional[str] = None,
+    tenant_database_name: Optional[str] = None,
     secret_arn: Optional[str] = None,
     ssl_encryption: str = 'require',
 ) -> Tuple:
@@ -397,10 +431,15 @@ def internal_create_connection(
     because the secret_arn changed, or None if no replacement occurred.
     The caller is responsible for closing it (async).
     """
+    # target_name uniquely identifies the connection target (service_name, sid,
+    # or tenant database) so the same instance can hold multiple connections.
+    target_name = tenant_database_name or service_name or sid or ''
+
     logger.info(
         f'internal_create_connection: region:{region}, method:{connection_method}, '
         f'instance:{instance_identifier}, endpoint:{db_endpoint}, db:{database}, '
-        f'service_name:{service_name}, sid:{sid}'
+        f'service_name:{service_name}, sid:{sid}, tenant_database_name:{tenant_database_name}, '
+        f'target_name:{target_name}'
     )
 
     if not region:
@@ -411,7 +450,7 @@ def internal_create_connection(
         raise ValueError("db_endpoint can't be none or empty")
 
     # Resolve secret_arn through fallback chain for password auth:
-    # explicit secret_arn → default_secret_arn → (defer to RDS MasterUserSecret)
+    # explicit secret_arn → default_secret_arn → (defer to RDS tenant DB or MasterUserSecret)
     if connection_method == ConnectionMethod.ORACLE_PASSWORD and not secret_arn:
         if server_config.default_secret_arn:
             secret_arn = server_config.default_secret_arn
@@ -420,18 +459,18 @@ def internal_create_connection(
     # Check for existing connection
     replaced_conn = None
     existing_conn = db_connection_map.get(
-        connection_method, instance_identifier, db_endpoint, database, port
+        connection_method, instance_identifier, db_endpoint, database, port, target_name
     )
     if existing_conn:
         # If a secret_arn was resolved and differs from the existing connection's,
         # replace the connection with one using the new credentials.
         if secret_arn and getattr(existing_conn, 'secret_arn', '') != secret_arn:
             logger.info(
-                f'Replacing existing connection for {instance_identifier}/{database}: '
+                f'Replacing existing connection for {instance_identifier}/{database}/{target_name}: '
                 f'secret_arn changed'
             )
             db_connection_map.remove(
-                connection_method, instance_identifier, db_endpoint, database, port
+                connection_method, instance_identifier, db_endpoint, database, port, target_name
             )
             replaced_conn = existing_conn
         else:
@@ -441,6 +480,7 @@ def internal_create_connection(
                 'db_endpoint': db_endpoint,
                 'database': database,
                 'port': port,
+                'target_name': target_name,
                 'service_name': getattr(existing_conn, 'service_name', service_name),
                 'sid': getattr(existing_conn, 'sid', sid),
             }
@@ -454,37 +494,75 @@ def internal_create_connection(
         rds_client = boto3.client(
             'rds', region_name=region, config=Config(user_agent_extra=__user_agent__)
         )
-        try:
-            response = rds_client.describe_db_instances(DBInstanceIdentifier=instance_identifier)
-        except ClientError as e:
-            code = e.response['Error']['Code']
-            if code == 'DBInstanceNotFound':
-                raise ValueError(
-                    f"RDS instance '{instance_identifier}' not found in region '{region}'"
-                ) from e
-            raise ValueError(
-                f'Failed to describe RDS instance: {e.response["Error"]["Message"]}'
-            ) from e
 
-        instances = response.get('DBInstances', [])
-        if not instances:
-            raise ValueError(
-                f"describe_db_instances returned no instances for '{instance_identifier}'"
-            )
-        instance_props = instances[0]
-
-        masteruser = instance_props.get('MasterUsername', '')
-
-        # Final fallback for password auth: RDS master secret
-        if not secret_arn:
-            master_secret = instance_props.get('MasterUserSecret')
-            if master_secret:
-                secret_arn = master_secret.get('SecretArn', '')
-            if not secret_arn:
-                raise ValueError(
-                    f"RDS instance '{instance_identifier}' has no managed master secret. "
-                    'Enable RDS-managed credentials or pass --secret_arn.'
+        # If a tenant database name was specified, retrieve credentials from it
+        if tenant_database_name:
+            try:
+                td_response = rds_client.describe_tenant_databases(
+                    DBInstanceIdentifier=instance_identifier,
+                    TenantDBName=tenant_database_name,
                 )
+            except ClientError as e:
+                code = e.response['Error']['Code']
+                raise ValueError(
+                    f"Failed to describe tenant database '{tenant_database_name}' "
+                    f"on instance '{instance_identifier}': {code} - "
+                    f"{e.response['Error']['Message']}"
+                ) from e
+
+            tenant_dbs = td_response.get('TenantDatabases', [])
+            if not tenant_dbs:
+                raise ValueError(
+                    f"No tenant database '{tenant_database_name}' found on "
+                    f"instance '{instance_identifier}' in region '{region}'"
+                )
+            tenant_props = tenant_dbs[0]
+            masteruser = tenant_props.get('MasterUsername', '')
+
+            if not secret_arn:
+                tenant_secret = tenant_props.get('MasterUserSecret')
+                if tenant_secret:
+                    secret_arn = tenant_secret.get('SecretArn', '')
+                if not secret_arn:
+                    raise ValueError(
+                        f"Tenant database '{tenant_database_name}' on instance "
+                        f"'{instance_identifier}' has no managed master secret. "
+                        'Enable RDS-managed credentials or pass --secret_arn.'
+                    )
+        else:
+            try:
+                response = rds_client.describe_db_instances(
+                    DBInstanceIdentifier=instance_identifier
+                )
+            except ClientError as e:
+                code = e.response['Error']['Code']
+                if code == 'DBInstanceNotFound':
+                    raise ValueError(
+                        f"RDS instance '{instance_identifier}' not found in region '{region}'"
+                    ) from e
+                raise ValueError(
+                    f'Failed to describe RDS instance: {e.response["Error"]["Message"]}'
+                ) from e
+
+            instances = response.get('DBInstances', [])
+            if not instances:
+                raise ValueError(
+                    f"describe_db_instances returned no instances for '{instance_identifier}'"
+                )
+            instance_props = instances[0]
+
+            masteruser = instance_props.get('MasterUsername', '')
+
+            # Final fallback for password auth: RDS master secret
+            if not secret_arn:
+                master_secret = instance_props.get('MasterUserSecret')
+                if master_secret:
+                    secret_arn = master_secret.get('SecretArn', '')
+                if not secret_arn:
+                    raise ValueError(
+                        f"RDS instance '{instance_identifier}' has no managed master secret. "
+                        'Enable RDS-managed credentials or pass --secret_arn.'
+                    )
 
     logger.info(
         f'Instance props: masteruser:{masteruser}, secret_arn:{secret_arn}, '
@@ -511,7 +589,8 @@ def internal_create_connection(
     )
 
     db_connection_map.set(
-        connection_method, instance_identifier, db_endpoint, database, db_connection, port
+        connection_method, instance_identifier, db_endpoint, database, db_connection, port,
+        target_name,
     )
     llm_response = {
         'connection_method': connection_method,
@@ -519,6 +598,7 @@ def internal_create_connection(
         'db_endpoint': db_endpoint,
         'database': database,
         'port': port,
+        'target_name': target_name,
         'service_name': service_name,
         'sid': sid,
     }
@@ -637,6 +717,10 @@ def main():
     )
     parser.add_argument('--secret_arn', help='AWS Secrets Manager ARN for database credentials')
     parser.add_argument(
+        '--tenant_database_name',
+        help='RDS Oracle tenant database name (for multi-tenant CDB)',
+    )
+    parser.add_argument(
         '--ssl_encryption',
         default='require',
         choices=['require', 'noverify', 'off'],
@@ -679,6 +763,7 @@ def main():
         f'port:{args.port}\n'
         f'service_name:{args.service_name}\n'
         f'sid:{args.sid}\n'
+        f'tenant_database_name:{args.tenant_database_name}\n'
         f'ssl_encryption:{args.ssl_encryption}\n'
         f'max_rows:{args.max_rows}\n'
         f'call_timeout_ms:{args.call_timeout_ms}\n'
@@ -732,6 +817,7 @@ def main():
                 database=args.database,
                 service_name=service_name,
                 sid=sid,
+                tenant_database_name=args.tenant_database_name,
                 ssl_encryption=server_config.ssl_encryption_mode,
             )
 

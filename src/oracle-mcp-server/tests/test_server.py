@@ -1309,6 +1309,131 @@ def test_internal_create_connection_empty_secret_arn_raises(mocker):
         )
 
 
+def test_internal_create_connection_tenant_database(mocker):
+    """Retrieves secret_arn from describe_tenant_databases when tenant_database_name is given."""
+    mocker.patch.object(db_connection_map, 'get', return_value=None)
+    mocker.patch.object(db_connection_map, 'set')
+
+    mock_rds = MagicMock()
+    mock_rds.describe_tenant_databases.return_value = {
+        'TenantDatabases': [
+            {
+                'MasterUsername': 'tenant_admin',
+                'MasterUserSecret': {
+                    'SecretArn': 'arn:aws:secretsmanager:us-east-1:123:secret:tenant-secret'  # pragma: allowlist secret
+                },
+            }
+        ]
+    }
+    mocker.patch('boto3.client', return_value=mock_rds)
+
+    conn, response, replaced = internal_create_connection(
+        region='us-east-1',
+        connection_method=ConnectionMethod.ORACLE_PASSWORD,
+        instance_identifier='inst1',
+        db_endpoint='ep1',
+        port=1521,
+        database='ORCL',
+        service_name='ORCL',
+        tenant_database_name='MY_TENANT_DB',
+    )
+
+    assert isinstance(conn, OracledbPoolConnection)
+    assert conn.secret_arn == 'arn:aws:secretsmanager:us-east-1:123:secret:tenant-secret'  # pragma: allowlist secret
+    assert response['target_name'] == 'MY_TENANT_DB'
+    mock_rds.describe_tenant_databases.assert_called_once_with(
+        DBInstanceIdentifier='inst1',
+        TenantDBName='MY_TENANT_DB',
+    )
+    mock_rds.describe_db_instances.assert_not_called()
+
+
+def test_internal_create_connection_tenant_database_no_secret_raises(mocker):
+    """Raises ValueError when tenant database has no managed master secret."""
+    mocker.patch.object(db_connection_map, 'get', return_value=None)
+
+    mock_rds = MagicMock()
+    mock_rds.describe_tenant_databases.return_value = {
+        'TenantDatabases': [{'MasterUsername': 'tenant_admin'}]
+    }
+    mocker.patch('boto3.client', return_value=mock_rds)
+
+    with pytest.raises(ValueError, match='Tenant database.*has no managed master secret'):
+        internal_create_connection(
+            region='us-east-1',
+            connection_method=ConnectionMethod.ORACLE_PASSWORD,
+            instance_identifier='inst1',
+            db_endpoint='ep1',
+            port=1521,
+            database='ORCL',
+            service_name='ORCL',
+            tenant_database_name='MY_TENANT_DB',
+        )
+
+
+def test_internal_create_connection_tenant_database_not_found_raises(mocker):
+    """Raises ValueError when no tenant database is found."""
+    mocker.patch.object(db_connection_map, 'get', return_value=None)
+
+    mock_rds = MagicMock()
+    mock_rds.describe_tenant_databases.return_value = {'TenantDatabases': []}
+    mocker.patch('boto3.client', return_value=mock_rds)
+
+    with pytest.raises(ValueError, match='No tenant database'):
+        internal_create_connection(
+            region='us-east-1',
+            connection_method=ConnectionMethod.ORACLE_PASSWORD,
+            instance_identifier='inst1',
+            db_endpoint='ep1',
+            port=1521,
+            database='ORCL',
+            service_name='ORCL',
+            tenant_database_name='NONEXISTENT_DB',
+        )
+
+
+def test_internal_create_connection_target_name_differentiates_cache(mocker):
+    """Same instance with different service_name values use different cache entries."""
+    conn_a = MagicMock()
+    conn_a.secret_arn = 'arn:a'  # pragma: allowlist secret
+    conn_a.service_name = 'SVC_A'
+    conn_a.sid = None
+
+    conn_b = MagicMock()
+    conn_b.secret_arn = 'arn:b'  # pragma: allowlist secret
+    conn_b.service_name = 'SVC_B'
+    conn_b.sid = None
+
+    # First call returns conn_a, second returns conn_b
+    mocker.patch.object(db_connection_map, 'get', side_effect=[conn_a, conn_b])
+
+    result_a, resp_a, _ = internal_create_connection(
+        region='us-east-1',
+        connection_method=ConnectionMethod.ORACLE_PASSWORD,
+        instance_identifier='inst1',
+        db_endpoint='ep1',
+        port=1521,
+        database='ORCL',
+        service_name='SVC_A',
+        secret_arn='arn:a',  # pragma: allowlist secret
+    )
+    result_b, resp_b, _ = internal_create_connection(
+        region='us-east-1',
+        connection_method=ConnectionMethod.ORACLE_PASSWORD,
+        instance_identifier='inst1',
+        db_endpoint='ep1',
+        port=1521,
+        database='ORCL',
+        service_name='SVC_B',
+        secret_arn='arn:b',  # pragma: allowlist secret
+    )
+
+    assert result_a is conn_a
+    assert result_b is conn_b
+    assert resp_a['target_name'] == 'SVC_A'
+    assert resp_b['target_name'] == 'SVC_B'
+
+
 # --- main() ---
 
 
