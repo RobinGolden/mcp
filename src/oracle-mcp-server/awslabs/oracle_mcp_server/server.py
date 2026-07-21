@@ -551,6 +551,14 @@ def internal_create_connection(
                 )
             instance_props = instances[0]
 
+            # Validate: multi-tenant instances require a tenant_database_name
+            if instance_props.get('MultiTenant', False):
+                raise ValueError(
+                    f"RDS instance '{instance_identifier}' is a multi-tenant (CDB) instance. "
+                    "You must specify 'tenant_database_name' to connect to a specific tenant "
+                    "database (PDB). Use describe_tenant_databases to list available tenants."
+                )
+
             masteruser = instance_props.get('MasterUsername', '')
 
             # Final fallback for password auth: RDS master secret

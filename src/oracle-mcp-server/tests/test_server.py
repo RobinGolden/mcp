@@ -1434,6 +1434,70 @@ def test_internal_create_connection_target_name_differentiates_cache(mocker):
     assert resp_b['target_name'] == 'SVC_B'
 
 
+def test_internal_create_connection_multitenant_without_tenant_db_name_raises(mocker):
+    """Raises ValueError when instance is multi-tenant but no tenant_database_name provided."""
+    mocker.patch.object(db_connection_map, 'get', return_value=None)
+
+    mock_rds = MagicMock()
+    mock_rds.describe_db_instances.return_value = {
+        'DBInstances': [
+            {
+                'MasterUsername': 'admin',
+                'MultiTenant': True,
+                'MasterUserSecret': {
+                    'SecretArn': 'arn:aws:secretsmanager:us-east-1:123:secret:master'  # pragma: allowlist secret
+                },
+            }
+        ]
+    }
+    mocker.patch('boto3.client', return_value=mock_rds)
+
+    with pytest.raises(ValueError, match='multi-tenant.*tenant_database_name'):
+        internal_create_connection(
+            region='us-east-1',
+            connection_method=ConnectionMethod.ORACLE_PASSWORD,
+            instance_identifier='inst1',
+            db_endpoint='ep1',
+            port=1521,
+            database='ORCL',
+            service_name='ORCL',
+        )
+
+
+def test_internal_create_connection_non_multitenant_without_tenant_db_name_succeeds(mocker):
+    """Non-multi-tenant instance connects fine without tenant_database_name."""
+    mocker.patch.object(db_connection_map, 'get', return_value=None)
+    mocker.patch.object(db_connection_map, 'set')
+
+    mock_rds = MagicMock()
+    mock_rds.describe_db_instances.return_value = {
+        'DBInstances': [
+            {
+                'MasterUsername': 'admin',
+                'MultiTenant': False,
+                'MasterUserSecret': {
+                    'SecretArn': 'arn:aws:secretsmanager:us-east-1:123:secret:master'  # pragma: allowlist secret
+                },
+            }
+        ]
+    }
+    mocker.patch('boto3.client', return_value=mock_rds)
+
+    conn, response, replaced = internal_create_connection(
+        region='us-east-1',
+        connection_method=ConnectionMethod.ORACLE_PASSWORD,
+        instance_identifier='inst1',
+        db_endpoint='ep1',
+        port=1521,
+        database='ORCL',
+        service_name='ORCL',
+    )
+
+    assert isinstance(conn, OracledbPoolConnection)
+    assert response['target_name'] == 'ORCL'
+    assert replaced is None
+
+
 # --- main() ---
 
 
