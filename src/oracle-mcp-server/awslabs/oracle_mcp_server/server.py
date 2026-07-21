@@ -288,15 +288,24 @@ async def get_table_schema(
 
 @mcp.tool(
     name='connect_to_database',
-    description='Connect to an Oracle RDS instance or tenant database and save the connection internally',
+    description='Connect to an Oracle database (RDS instance, RDS tenant database, or ODB Autonomous Database) and save the connection internally',
 )
 async def connect_to_database(
     region: Annotated[str, Field(description='AWS region')],
     connection_method: Annotated[ConnectionMethod, Field(description='connection method')],
-    db_endpoint: Annotated[str, Field(description='database endpoint')],
     instance_identifier: Annotated[
+        str,
+        Field(
+            description='Database identifier: RDS instance name, ODB Autonomous Database ID '
+            '(starts with adb_), or full ARN (arn:aws:rds:... or arn:aws:odb:...)'
+        ),
+    ],
+    db_endpoint: Annotated[
         Optional[str],
-        Field(description='RDS instance identifier (defaults to db_endpoint if omitted)'),
+        Field(
+            description='Database endpoint address. Required for RDS instances, '
+            'optional for ODB Autonomous Databases (auto-resolved from get_autonomous_database)'
+        ),
     ] = None,
     port: Annotated[int, Field(description='Oracle port')] = 1521,
     database: Annotated[str, Field(description='database/schema name')] = 'ORCL',
@@ -317,13 +326,16 @@ async def connect_to_database(
     secret_arn: Annotated[
         Optional[str],
         Field(
-            description='Secrets Manager ARN for database credentials (overrides the RDS master secret)'
+            description='Secrets Manager ARN for database credentials (overrides auto-resolved secret)'
         ),
     ] = None,
 ) -> str | dict:
-    """Connect to an Oracle RDS instance or tenant database and save the connection internally."""
-    instance_identifier = instance_identifier or db_endpoint
+    """Connect to an Oracle database and save the connection internally.
 
+    Supports RDS Oracle instances, RDS multi-tenant (CDB) tenant databases,
+    and ODB Autonomous Databases. The service type is auto-detected from the
+    instance_identifier format.
+    """
     if service_name and sid:
         return {'status': 'Failed', 'error': 'Provide either service_name or sid, not both'}
     if not service_name and not sid:
@@ -345,6 +357,7 @@ async def connect_to_database(
         )
 
         target_name = tenant_database_name or service_name or sid or ''
+        resolved_endpoint = llm_response.get('db_endpoint', db_endpoint or '')
 
         if replaced_conn:
             try:
@@ -357,7 +370,7 @@ async def connect_to_database(
                 await db_connection.initialize_pool()
             except Exception as pool_err:
                 db_connection_map.remove(
-                    connection_method, instance_identifier, db_endpoint, database, port,
+                    connection_method, instance_identifier, resolved_endpoint, database, port,
                     target_name,
                 )
                 logger.exception(f'connect_to_database pool init failed: {pool_err}')
@@ -411,11 +424,54 @@ def get_database_connection_info() -> list:
     return db_connection_map.get_keys()
 
 
+def _parse_instance_identifier(identifier: str) -> Tuple[str, str]:
+    """Detect database service type from the instance identifier.
+
+    Returns a 2-tuple: (service_type, resolved_id).
+      - service_type: 'rds' or 'odb'
+      - resolved_id: the identifier to pass to the respective AWS API
+
+    Detection logic:
+      - ARN starting with 'arn:aws:odb:' → ('odb', full_arn)
+      - ARN starting with 'arn:aws:rds:' → ('rds', db_instance_identifier extracted from ARN)
+      - Short ID starting with 'adb_' → ('odb', short_id)
+      - Anything else → ('rds', identifier)
+    """
+    if not identifier:
+        raise ValueError("instance_identifier can't be None or empty")
+
+    if identifier.startswith('arn:'):
+        parts = identifier.split(':')
+        if len(parts) < 6:
+            raise ValueError(f"Invalid ARN format: '{identifier}'")
+        service = parts[2]
+        if service == 'odb':
+            # ODB ARN: arn:aws:odb:region:account:autonomous-database/adb_id
+            return ('odb', identifier)
+        elif service == 'rds':
+            # RDS ARN: arn:aws:rds:region:account:db:instance-name
+            if len(parts) < 7 or not parts[6]:
+                raise ValueError(
+                    f"Cannot extract instance identifier from RDS ARN: '{identifier}'"
+                )
+            return ('rds', parts[6])
+            return ('rds', resource)
+        else:
+            raise ValueError(
+                f"Unsupported service '{service}' in ARN: '{identifier}'. "
+                "Expected 'rds' or 'odb'."
+            )
+    elif identifier.startswith('adb_'):
+        return ('odb', identifier)
+    else:
+        return ('rds', identifier)
+
+
 def internal_create_connection(
     region: str,
     connection_method: ConnectionMethod,
     instance_identifier: str,
-    db_endpoint: str,
+    db_endpoint: Optional[str],
     port: int,
     database: str,
     service_name: Optional[str] = None,
@@ -430,6 +486,11 @@ def internal_create_connection(
     replaced_connection is the old connection that was evicted from the cache
     because the secret_arn changed, or None if no replacement occurred.
     The caller is responsible for closing it (async).
+
+    Supports both RDS Oracle instances and ODB Autonomous Databases. The service
+    type is auto-detected from instance_identifier (ARN service field or 'adb_' prefix).
+    For autonomous databases, db_endpoint is resolved from get_autonomous_database if
+    not explicitly provided.
     """
     # target_name uniquely identifies the connection target (service_name, sid,
     # or tenant database) so the same instance can hold multiple connections.
@@ -446,11 +507,16 @@ def internal_create_connection(
         raise ValueError("region can't be none or empty")
     if not connection_method:
         raise ValueError("connection_method can't be none or empty")
-    if not db_endpoint:
-        raise ValueError("db_endpoint can't be none or empty")
+
+    # Detect service type from the instance identifier
+    service_type, resolved_id = _parse_instance_identifier(instance_identifier)
+
+    # For RDS, db_endpoint is required. For ODB, it can be auto-resolved.
+    if service_type == 'rds' and not db_endpoint:
+        raise ValueError("db_endpoint is required for RDS instances")
 
     # Resolve secret_arn through fallback chain for password auth:
-    # explicit secret_arn → default_secret_arn → (defer to RDS tenant DB or MasterUserSecret)
+    # explicit secret_arn → default_secret_arn → (defer to API lookup)
     if connection_method == ConnectionMethod.ORACLE_PASSWORD and not secret_arn:
         if server_config.default_secret_arn:
             secret_arn = server_config.default_secret_arn
@@ -459,7 +525,7 @@ def internal_create_connection(
     # Check for existing connection
     replaced_conn = None
     existing_conn = db_connection_map.get(
-        connection_method, instance_identifier, db_endpoint, database, port, target_name
+        connection_method, instance_identifier, db_endpoint or '', database, port, target_name
     )
     if existing_conn:
         # If a secret_arn was resolved and differs from the existing connection's,
@@ -470,14 +536,15 @@ def internal_create_connection(
                 f'secret_arn changed'
             )
             db_connection_map.remove(
-                connection_method, instance_identifier, db_endpoint, database, port, target_name
+                connection_method, instance_identifier, db_endpoint or '', database, port,
+                target_name,
             )
             replaced_conn = existing_conn
         else:
             llm_response = {
                 'connection_method': connection_method,
                 'instance_identifier': instance_identifier,
-                'db_endpoint': db_endpoint,
+                'db_endpoint': db_endpoint or getattr(existing_conn, 'host', ''),
                 'database': database,
                 'port': port,
                 'target_name': target_name,
@@ -486,11 +553,67 @@ def internal_create_connection(
             }
             return (existing_conn, llm_response, None)
 
-    # For ORACLE_PASSWORD with a resolved secret ARN, skip describe_db_instances
+    # For ORACLE_PASSWORD with a resolved secret ARN, skip API calls for credential lookup
     # (masteruser is not needed — credentials come from the secret itself).
     if connection_method == ConnectionMethod.ORACLE_PASSWORD and secret_arn:
         masteruser = ''
+        # For ODB without db_endpoint, still need to resolve the endpoint
+        if service_type == 'odb' and not db_endpoint:
+            odb_client = boto3.client(
+                'odb', region_name=region, config=Config(user_agent_extra=__user_agent__)
+            )
+            try:
+                adb_response = odb_client.get_autonomous_database(
+                    autonomousDatabaseId=resolved_id
+                )
+            except ClientError as e:
+                code = e.response['Error']['Code']
+                raise ValueError(
+                    f"Failed to get autonomous database '{resolved_id}': "
+                    f"{code} - {e.response['Error']['Message']}"
+                ) from e
+            adb_props = adb_response.get('autonomousDatabase', {})
+            db_endpoint = adb_props.get('privateEndpointIp') or adb_props.get('privateEndpoint')
+            if not db_endpoint:
+                raise ValueError(
+                    f"Autonomous database '{resolved_id}' has no private endpoint. "
+                    "Ensure the database has a private endpoint configured."
+                )
+    elif service_type == 'odb':
+        # ODB Autonomous Database path — secret_arn is required
+        if not secret_arn:
+            raise ValueError(
+                f"secret_arn is required for ODB Autonomous Database '{resolved_id}'. "
+                "Pass --secret_arn with the Secrets Manager ARN containing database credentials."
+            )
+
+        # Resolve endpoint if not explicitly provided
+        if not db_endpoint:
+            odb_client = boto3.client(
+                'odb', region_name=region, config=Config(user_agent_extra=__user_agent__)
+            )
+            try:
+                adb_response = odb_client.get_autonomous_database(
+                    autonomousDatabaseId=resolved_id
+                )
+            except ClientError as e:
+                code = e.response['Error']['Code']
+                raise ValueError(
+                    f"Failed to get autonomous database '{resolved_id}': "
+                    f"{code} - {e.response['Error']['Message']}"
+                ) from e
+
+            adb_props = adb_response.get('autonomousDatabase', {})
+            db_endpoint = adb_props.get('privateEndpointIp') or adb_props.get('privateEndpoint')
+            if not db_endpoint:
+                raise ValueError(
+                    f"Autonomous database '{resolved_id}' has no private endpoint. "
+                    "Ensure the database has a private endpoint configured."
+                )
+
+        masteruser = ''
     else:
+        # RDS path
         rds_client = boto3.client(
             'rds', region_name=region, config=Config(user_agent_extra=__user_agent__)
         )
@@ -499,14 +622,14 @@ def internal_create_connection(
         if tenant_database_name:
             try:
                 td_response = rds_client.describe_tenant_databases(
-                    DBInstanceIdentifier=instance_identifier,
+                    DBInstanceIdentifier=resolved_id,
                     TenantDBName=tenant_database_name,
                 )
             except ClientError as e:
                 code = e.response['Error']['Code']
                 raise ValueError(
                     f"Failed to describe tenant database '{tenant_database_name}' "
-                    f"on instance '{instance_identifier}': {code} - "
+                    f"on instance '{resolved_id}': {code} - "
                     f"{e.response['Error']['Message']}"
                 ) from e
 
@@ -514,7 +637,7 @@ def internal_create_connection(
             if not tenant_dbs:
                 raise ValueError(
                     f"No tenant database '{tenant_database_name}' found on "
-                    f"instance '{instance_identifier}' in region '{region}'"
+                    f"instance '{resolved_id}' in region '{region}'"
                 )
             tenant_props = tenant_dbs[0]
             masteruser = tenant_props.get('MasterUsername', '')
@@ -526,19 +649,19 @@ def internal_create_connection(
                 if not secret_arn:
                     raise ValueError(
                         f"Tenant database '{tenant_database_name}' on instance "
-                        f"'{instance_identifier}' has no managed master secret. "
+                        f"'{resolved_id}' has no managed master secret. "
                         'Enable RDS-managed credentials or pass --secret_arn.'
                     )
         else:
             try:
                 response = rds_client.describe_db_instances(
-                    DBInstanceIdentifier=instance_identifier
+                    DBInstanceIdentifier=resolved_id
                 )
             except ClientError as e:
                 code = e.response['Error']['Code']
                 if code == 'DBInstanceNotFound':
                     raise ValueError(
-                        f"RDS instance '{instance_identifier}' not found in region '{region}'"
+                        f"RDS instance '{resolved_id}' not found in region '{region}'"
                     ) from e
                 raise ValueError(
                     f'Failed to describe RDS instance: {e.response["Error"]["Message"]}'
@@ -547,14 +670,14 @@ def internal_create_connection(
             instances = response.get('DBInstances', [])
             if not instances:
                 raise ValueError(
-                    f"describe_db_instances returned no instances for '{instance_identifier}'"
+                    f"describe_db_instances returned no instances for '{resolved_id}'"
                 )
             instance_props = instances[0]
 
             # Validate: multi-tenant instances require a tenant_database_name
             if instance_props.get('MultiTenant', False):
                 raise ValueError(
-                    f"RDS instance '{instance_identifier}' is a multi-tenant (CDB) instance. "
+                    f"RDS instance '{resolved_id}' is a multi-tenant (CDB) instance. "
                     "You must specify 'tenant_database_name' to connect to a specific tenant "
                     "database (PDB). Use describe_tenant_databases to list available tenants."
                 )
@@ -568,7 +691,7 @@ def internal_create_connection(
                     secret_arn = master_secret.get('SecretArn', '')
                 if not secret_arn:
                     raise ValueError(
-                        f"RDS instance '{instance_identifier}' has no managed master secret. "
+                        f"RDS instance '{resolved_id}' has no managed master secret. "
                         'Enable RDS-managed credentials or pass --secret_arn.'
                     )
 
@@ -713,8 +836,12 @@ def main():
         description='An AWS Labs Model Context Protocol (MCP) server for Oracle Database on AWS RDS'
     )
     parser.add_argument('--connection_method', help='ORACLE_PASSWORD')
-    parser.add_argument('--instance_identifier', help='RDS instance identifier')
-    parser.add_argument('--db_endpoint', help='Oracle endpoint address')
+    parser.add_argument(
+        '--instance_identifier',
+        help='Database identifier: RDS instance name, ODB Autonomous Database ID (adb_*), '
+        'or full ARN (arn:aws:rds:... or arn:aws:odb:...)',
+    )
+    parser.add_argument('--db_endpoint', help='Oracle endpoint address (auto-resolved for ODB)')
     parser.add_argument('--region', help='AWS region')
     parser.add_argument('--allow_write_query', action='store_true', help='Allow write queries')
     parser.add_argument('--database', help='Database/schema name', default='ORCL')
@@ -752,12 +879,14 @@ def main():
         logger.error('Cannot specify both --service_name and --sid')
         sys.exit(1)
 
-    if args.db_endpoint:
+    # Startup connection requires either db_endpoint or instance_identifier
+    has_startup_connection = args.db_endpoint or args.instance_identifier
+    if has_startup_connection:
         if not args.connection_method:
-            logger.error('--connection_method is required when --db_endpoint is provided')
+            logger.error('--connection_method is required when connecting at startup')
             sys.exit(1)
         if not args.region:
-            logger.error('--region is required when --db_endpoint is provided')
+            logger.error('--region is required when connecting at startup')
             sys.exit(1)
 
     logger.info(
@@ -799,7 +928,7 @@ def main():
                 tool.description += readonly_notice
 
     try:
-        if args.db_endpoint:
+        if has_startup_connection:
             instance_identifier = args.instance_identifier or args.db_endpoint
             service_name = args.service_name
             sid = args.sid
