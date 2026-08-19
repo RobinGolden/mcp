@@ -1343,7 +1343,9 @@ def test_internal_create_connection_tenant_database(mocker):
     )
 
     assert isinstance(conn, OracledbPoolConnection)
-    assert conn.secret_arn == 'arn:aws:secretsmanager:us-east-1:123:secret:tenant-secret'  # pragma: allowlist secret
+    assert (
+        conn.secret_arn == 'arn:aws:secretsmanager:us-east-1:123:secret:tenant-secret'
+    )  # pragma: allowlist secret
     assert response['target_name'] == 'MY_TENANT_DB'
     mock_rds.describe_tenant_databases.assert_called_once_with(
         DBInstanceIdentifier='inst1',
@@ -1583,12 +1585,12 @@ def test_internal_create_connection_odb_autonomous_db(mocker):
 
     assert isinstance(conn, OracledbPoolConnection)
     assert conn.host == '10.0.1.50'
-    assert conn.secret_arn == 'arn:aws:secretsmanager:us-east-1:123:secret:adb-admin'  # pragma: allowlist secret
+    assert (
+        conn.secret_arn == 'arn:aws:secretsmanager:us-east-1:123:secret:adb-admin'
+    )  # pragma: allowlist secret
     assert response['db_endpoint'] == '10.0.1.50'
     assert response['instance_identifier'] == 'adb_zkt79n0iin'
-    mock_odb.get_autonomous_database.assert_called_once_with(
-        autonomousDatabaseId='adb_zkt79n0iin'
-    )
+    mock_odb.get_autonomous_database.assert_called_once_with(autonomousDatabaseId='adb_zkt79n0iin')
 
 
 def test_internal_create_connection_odb_arn(mocker):
@@ -1626,9 +1628,7 @@ def test_internal_create_connection_odb_no_endpoint_raises(mocker):
     mocker.patch.object(db_connection_map, 'get', return_value=None)
 
     mock_odb = MagicMock()
-    mock_odb.get_autonomous_database.return_value = {
-        'autonomousDatabase': {}
-    }
+    mock_odb.get_autonomous_database.return_value = {'autonomousDatabase': {}}
     mocker.patch('boto3.client', return_value=mock_odb)
 
     with pytest.raises(ValueError, match='no private endpoint'):
@@ -1709,7 +1709,9 @@ def test_internal_create_connection_odb_with_explicit_secret(mocker):
     )
 
     assert conn.host == '10.0.2.100'
-    assert conn.secret_arn == 'arn:aws:secretsmanager:us-east-1:123:secret:my-custom-secret'  # pragma: allowlist secret
+    assert (
+        conn.secret_arn == 'arn:aws:secretsmanager:us-east-1:123:secret:my-custom-secret'
+    )  # pragma: allowlist secret
     # Calls get_autonomous_database to resolve endpoint
     mock_odb.get_autonomous_database.assert_called_once()
 

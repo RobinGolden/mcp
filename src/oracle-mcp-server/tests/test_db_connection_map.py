@@ -245,9 +245,7 @@ def test_target_name_included_in_get_keys(conn_map):
     conn.service_name = 'ORCL'
     conn.sid = None
     conn.secret_arn = None
-    conn_map.set(
-        ConnectionMethod.ORACLE_PASSWORD, 'inst1', 'ep1', 'ORCL', conn, 1521, 'MY_TENANT'
-    )
+    conn_map.set(ConnectionMethod.ORACLE_PASSWORD, 'inst1', 'ep1', 'ORCL', conn, 1521, 'MY_TENANT')
     keys = conn_map.get_keys()
     assert len(keys) == 1
     assert keys[0]['target_name'] == 'MY_TENANT'
@@ -257,12 +255,8 @@ def test_remove_with_target_name(conn_map):
     """Remove correctly targets connection by target_name."""
     conn_a = MagicMock()
     conn_b = MagicMock()
-    conn_map.set(
-        ConnectionMethod.ORACLE_PASSWORD, 'inst1', 'ep1', 'db1', conn_a, 1521, 'SVC_A'
-    )
-    conn_map.set(
-        ConnectionMethod.ORACLE_PASSWORD, 'inst1', 'ep1', 'db1', conn_b, 1521, 'SVC_B'
-    )
+    conn_map.set(ConnectionMethod.ORACLE_PASSWORD, 'inst1', 'ep1', 'db1', conn_a, 1521, 'SVC_A')
+    conn_map.set(ConnectionMethod.ORACLE_PASSWORD, 'inst1', 'ep1', 'db1', conn_b, 1521, 'SVC_B')
     conn_map.remove(ConnectionMethod.ORACLE_PASSWORD, 'inst1', 'ep1', 'db1', 1521, 'SVC_A')
     assert (
         conn_map.get(ConnectionMethod.ORACLE_PASSWORD, 'inst1', 'ep1', 'db1', 1521, 'SVC_A')
