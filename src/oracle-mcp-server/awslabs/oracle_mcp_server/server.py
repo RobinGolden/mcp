@@ -329,6 +329,15 @@ async def connect_to_database(
             description='Secrets Manager ARN for database credentials (overrides auto-resolved secret)'
         ),
     ] = None,
+    ssl_encryption: Annotated[
+        Optional[str],
+        Field(
+            description="TLS mode for this connection: 'require', 'noverify', or 'off'. "
+            'When omitted, falls back to the server launch value (--ssl_encryption). '
+            'Set per connection so a single server can hold both plain-TCP (e.g. RDS on '
+            '1521) and TCPS (e.g. ODB Autonomous on 1522) connections at once.'
+        ),
+    ] = None,
 ) -> str | dict:
     """Connect to an Oracle database and save the connection internally.
 
@@ -353,7 +362,7 @@ async def connect_to_database(
             sid=sid,
             tenant_database_name=tenant_database_name,
             secret_arn=secret_arn,
-            ssl_encryption=server_config.ssl_encryption_mode,
+            ssl_encryption=ssl_encryption or server_config.ssl_encryption_mode,
         )
 
         target_name = tenant_database_name or service_name or sid or ''
