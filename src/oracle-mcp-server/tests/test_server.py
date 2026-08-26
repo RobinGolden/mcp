@@ -1105,6 +1105,73 @@ async def test_connect_to_database_success(mocker):
 
 
 @pytest.mark.asyncio
+async def test_connect_to_database_ssl_encryption_passed_through(mocker):
+    """An explicit ssl_encryption value is forwarded to internal_create_connection."""
+    from awslabs.oracle_mcp_server.server import connect_to_database
+
+    mock_pool_conn = MagicMock(spec=OracledbPoolConnection)
+    mock_pool_conn.initialize_pool = AsyncMock()
+    llm_response = {
+        'connection_method': ConnectionMethod.ORACLE_PASSWORD,
+        'instance_identifier': 'inst1',
+        'db_endpoint': 'ep1',
+        'database': 'ORCL',
+        'port': 1521,
+        'service_name': 'ORCL',
+        'sid': None,
+    }
+    mock_create = mocker.patch(
+        'awslabs.oracle_mcp_server.server.internal_create_connection',
+        return_value=(mock_pool_conn, llm_response, None),
+    )
+
+    await connect_to_database(
+        region='us-east-1',
+        connection_method=ConnectionMethod.ORACLE_PASSWORD,
+        instance_identifier='inst1',
+        db_endpoint='ep1',
+        service_name='ORCL',
+        ssl_encryption='off',
+    )
+
+    assert mock_create.call_args.kwargs['ssl_encryption'] == 'off'
+
+
+@pytest.mark.asyncio
+async def test_connect_to_database_ssl_encryption_defaults_to_server_config(mocker):
+    """When ssl_encryption is omitted, it falls back to the server launch value."""
+    from awslabs.oracle_mcp_server.server import connect_to_database, server_config
+
+    server_config.ssl_encryption_mode = 'require'
+
+    mock_pool_conn = MagicMock(spec=OracledbPoolConnection)
+    mock_pool_conn.initialize_pool = AsyncMock()
+    llm_response = {
+        'connection_method': ConnectionMethod.ORACLE_PASSWORD,
+        'instance_identifier': 'inst1',
+        'db_endpoint': 'ep1',
+        'database': 'ORCL',
+        'port': 1521,
+        'service_name': 'ORCL',
+        'sid': None,
+    }
+    mock_create = mocker.patch(
+        'awslabs.oracle_mcp_server.server.internal_create_connection',
+        return_value=(mock_pool_conn, llm_response, None),
+    )
+
+    await connect_to_database(
+        region='us-east-1',
+        connection_method=ConnectionMethod.ORACLE_PASSWORD,
+        instance_identifier='inst1',
+        db_endpoint='ep1',
+        service_name='ORCL',
+    )
+
+    assert mock_create.call_args.kwargs['ssl_encryption'] == 'require'
+
+
+@pytest.mark.asyncio
 async def test_connect_to_database_both_service_and_sid():
     """Both service_name and sid returns an error."""
     from awslabs.oracle_mcp_server.server import connect_to_database
