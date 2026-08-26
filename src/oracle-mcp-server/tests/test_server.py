@@ -1344,8 +1344,9 @@ def test_internal_create_connection_tenant_database(mocker):
 
     assert isinstance(conn, OracledbPoolConnection)
     assert (
-        conn.secret_arn == 'arn:aws:secretsmanager:us-east-1:123:secret:tenant-secret'
-    )  # pragma: allowlist secret
+        conn.secret_arn
+        == 'arn:aws:secretsmanager:us-east-1:123:secret:tenant-secret'  # pragma: allowlist secret
+    )
     assert response['target_name'] == 'MY_TENANT_DB'
     mock_rds.describe_tenant_databases.assert_called_once_with(
         DBInstanceIdentifier='inst1',
@@ -1586,8 +1587,9 @@ def test_internal_create_connection_odb_autonomous_db(mocker):
     assert isinstance(conn, OracledbPoolConnection)
     assert conn.host == '10.0.1.50'
     assert (
-        conn.secret_arn == 'arn:aws:secretsmanager:us-east-1:123:secret:adb-admin'
-    )  # pragma: allowlist secret
+        conn.secret_arn
+        == 'arn:aws:secretsmanager:us-east-1:123:secret:adb-admin'  # pragma: allowlist secret
+    )
     assert response['db_endpoint'] == '10.0.1.50'
     assert response['instance_identifier'] == 'adb_zkt79n0iin'
     mock_odb.get_autonomous_database.assert_called_once_with(autonomousDatabaseId='adb_zkt79n0iin')
@@ -1710,8 +1712,9 @@ def test_internal_create_connection_odb_with_explicit_secret(mocker):
 
     assert conn.host == '10.0.2.100'
     assert (
-        conn.secret_arn == 'arn:aws:secretsmanager:us-east-1:123:secret:my-custom-secret'
-    )  # pragma: allowlist secret
+        conn.secret_arn
+        == 'arn:aws:secretsmanager:us-east-1:123:secret:my-custom-secret'  # pragma: allowlist secret
+    )
     # Calls get_autonomous_database to resolve endpoint
     mock_odb.get_autonomous_database.assert_called_once()
 

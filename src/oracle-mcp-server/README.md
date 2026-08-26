@@ -89,14 +89,14 @@ Example secret value:
 
 By default the server connects with `--ssl_encryption require`, which encrypts the
 connection using Oracle TCPS and validates the server certificate against the system CA
-store. 
+store.
 
 For Oracle Database@AWS download the client certificate from OCI for Exadata Dedicated Databases
 and from AWS ODB@AWS for Autonomous Serverless databases.
 
    - **Exadata Dedicated**: Download the client certificate from the OCI Console
      (PDB Database > More Action > PDB Connection > Download Connection Bundle)
-   - **Autonomous Serverless**: Download the wallet using the following command: 
+   - **Autonomous Serverless**: Download the wallet using the following command:
     ```aws odb create-autonomous-database-wallet \
        --autonomous-database-id <adb-id> \
        --wallet-type REGIONAL \
