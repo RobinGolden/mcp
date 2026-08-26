@@ -40,10 +40,15 @@ awslabs.oracle-mcp-server \
 `--service_name` is the `_high` / `_medium` / `_low` service from the database's
 connection string (e.g. `<ocid-prefix>_<dbname>_high.adb.oraclecloud.com`).
 
+Pass the Autonomous Database as `--instance_identifier` using its ODB ARN
+(`arn:aws:odb:...:autonomous-database/adb_...`) or short `adb_...` id, and the private
+endpoint is resolved automatically via `odb:GetAutonomousDatabase` — so `--db_endpoint`
+is optional:
+
 ```bash
 awslabs.oracle-mcp-server \
   --connection_method ORACLE_PASSWORD \
-  --db_endpoint 10.0.0.10 \
+  --instance_identifier arn:aws:odb:us-east-1:123456789012:autonomous-database/adb_xxxxxxxxxx \
   --port 1522 \
   --service_name gxxxxxxxxxxxxxx_mydbname_high.adb.oraclecloud.com \
   --secret_arn arn:aws:secretsmanager:us-east-1:123456789012:secret:my-readonly-user-AbCdEf \
