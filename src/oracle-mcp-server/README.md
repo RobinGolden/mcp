@@ -33,19 +33,27 @@ awslabs.oracle-mcp-server \
   --service_name ORCL
 ```
 
-### Oracle Database@AWS Database
+### Oracle Database@AWS
+
+**Autonomous Serverless (ADB-S)** connects over TCPS on port `1522`. Use
+`--ssl_encryption noverify` (or `require` if the wallet/CA is installed locally). The
+`--service_name` is the `_high` / `_medium` / `_low` service from the database's
+connection string (e.g. `<ocid-prefix>_<dbname>_high.adb.oraclecloud.com`).
 
 ```bash
 awslabs.oracle-mcp-server \
   --connection_method ORACLE_PASSWORD \
-  --instance_identifier my-exadata  \
-  --db_endpoint my-instance-scan.client.xxxx.oraclevcn.com \
-  --region us-east-1 \
-  --database TESTDB \
-  --service_name TESTDB_PDB1.paas.oracle.com \
+  --db_endpoint 10.0.0.10 \
+  --port 1522 \
+  --service_name gxxxxxxxxxxxxxx_mydbname_high.adb.oraclecloud.com \
   --secret_arn arn:aws:secretsmanager:us-east-1:123456789012:secret:my-readonly-user-AbCdEf \
-  --port 2484
+  --region us-east-1 \
+  --ssl_encryption noverify
 ```
+
+For **Exadata Dedicated**, connect to a node VIP (not the SCAN address, which
+redirects across RAC nodes) on port `2484` using the PDB service name, e.g.
+`--service_name TESTDB_PDB1.paas.oracle.com --port 2484 --ssl_encryption noverify`.
 
 ## Connection Methods
 
